@@ -1,8 +1,7 @@
 "use client"
 
 import type React from "react"
-
-import { useState, useRef, useCallback } from "react"
+import { useState, useRef, useCallback, useEffect } from "react"
 import { type DocxChange, extractChanges } from "@/lib/docx-parser"
 import { renderAsync } from "docx-preview"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
@@ -19,83 +18,105 @@ export default function ContractRedlinePage() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [proposedTexts, setProposedTexts] = useState<Record<string, string>>({})
 
   const documentViewerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const originalTextRef = useRef<string | null>(null)
 
-  const clearHighlights = () => {
+  const clearHighlights = useCallback(() => {
     const viewer = documentViewerRef.current
     if (!viewer) return
+
+    if (originalTextRef.current) {
+      const currentMark = viewer.querySelector("mark.live-edit")
+      if (currentMark) {
+        currentMark.textContent = originalTextRef.current
+        currentMark.classList.remove("live-edit")
+      }
+      originalTextRef.current = null
+    }
 
     const existingHighlights = viewer.querySelectorAll("mark")
     existingHighlights.forEach((mark) => {
       const parent = mark.parentNode
-      if (parent) {
-        parent.replaceChild(document.createTextNode(mark.textContent || ""), mark)
+      if (parent && mark.textContent) {
+        parent.replaceChild(document.createTextNode(mark.textContent), mark)
         parent.normalize()
       }
     })
-  }
+  }, [])
 
-  const highlightTextInViewer = useCallback((text: string) => {
-    const viewer = documentViewerRef.current
-    if (!viewer || !text) return
+  const highlightTextInViewer = useCallback(
+    (text: string) => {
+      const viewer = documentViewerRef.current
+      if (!viewer || !text) return
 
-    clearHighlights()
+      clearHighlights()
 
-    const treeWalker = document.createTreeWalker(viewer, NodeFilter.SHOW_TEXT, null)
-    let currentNode
-    const nodesToProcess: { node: Text; index: number }[] = []
-
-    while ((currentNode = treeWalker.nextNode())) {
-      if (currentNode instanceof Text) {
-        const index = currentNode.nodeValue?.indexOf(text)
-        if (index !== -1 && typeof index === "number") {
-          nodesToProcess.push({ node: currentNode, index })
+      const treeWalker = document.createTreeWalker(viewer, NodeFilter.SHOW_TEXT, null)
+      let currentNode
+      while ((currentNode = treeWalker.nextNode())) {
+        if (currentNode instanceof Text) {
+          const index = currentNode.nodeValue?.indexOf(text)
+          if (index !== -1 && typeof index === "number") {
+            const range = document.createRange()
+            range.setStart(currentNode, index)
+            range.setEnd(currentNode, index + text.length)
+            const mark = document.createElement("mark")
+            mark.className = "bg-yellow-200 dark:bg-yellow-700 rounded px-1"
+            range.surroundContents(mark)
+            mark.scrollIntoView({ behavior: "smooth", block: "center" })
+            originalTextRef.current = text
+            return
+          }
         }
       }
+    },
+    [clearHighlights],
+  )
+
+  useEffect(() => {
+    const viewer = documentViewerRef.current
+    if (!viewer || !selectedChangeId) return
+
+    const mark = viewer.querySelector("mark")
+    if (!mark) return
+
+    const proposedText = proposedTexts[selectedChangeId]
+
+    if (typeof proposedText === "string") {
+      mark.textContent = proposedText
+      mark.classList.add("live-edit", "bg-blue-200", "dark:bg-blue-700")
+    } else if (originalTextRef.current) {
+      mark.textContent = originalTextRef.current
+      mark.classList.remove("live-edit", "bg-blue-200", "dark:bg-blue-700")
     }
-
-    if (nodesToProcess.length > 0) {
-      const { node, index } = nodesToProcess[0] // Highlight first occurrence
-      const mark = document.createElement("mark")
-      mark.className = "bg-yellow-200 dark:bg-yellow-700 rounded px-1"
-
-      const range = document.createRange()
-      range.setStart(node, index)
-      range.setEnd(node, index + text.length)
-      range.surroundContents(mark)
-
-      mark.scrollIntoView({ behavior: "smooth", block: "center" })
-    }
-  }, [])
+  }, [proposedTexts, selectedChangeId])
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = event.target.files?.[0]
     if (!uploadedFile) return
-
     if (!uploadedFile.name.endsWith(".docx")) {
       setError("Please upload a valid .docx file.")
       return
     }
-
     setIsLoading(true)
     setError(null)
     setFile(uploadedFile)
     setChanges([])
     setSelectedChangeId(null)
-
+    setProposedTexts({})
     try {
       const extracted = await extractChanges(uploadedFile)
       setChanges(extracted)
-
       if (documentViewerRef.current) {
-        documentViewerRef.current.innerHTML = "" // Clear previous view
+        documentViewerRef.current.innerHTML = ""
         await renderAsync(uploadedFile, documentViewerRef.current)
       }
     } catch (e) {
       console.error(e)
-      setError("Failed to process the document. It might be corrupted or in an unsupported format.")
+      setError("Failed to process the document.")
     } finally {
       setIsLoading(false)
     }
@@ -106,46 +127,87 @@ export default function ContractRedlinePage() {
     highlightTextInViewer(change.text)
   }
 
+  const handleProposalChange = (changeId: string, text: string) => {
+    setProposedTexts((prev) => ({ ...prev, [changeId]: text }))
+  }
+
   const triggerFileUpload = () => {
     fileInputRef.current?.click()
   }
 
   const handleRedlineAction = async (change: DocxChange, action: "accept" | "reject") => {
     if (!file) return
-
     setIsProcessing(true)
     setError(null)
+
+    const proposedText = proposedTexts[change.id]
+    const isProposal = action === "accept" && typeof proposedText === "string" && proposedText.trim() !== ""
 
     const formData = new FormData()
     formData.append("file", file)
     formData.append("changeId", change.id)
     formData.append("changeType", change.type)
     formData.append("action", action)
+    if (isProposal) {
+      formData.append("proposedText", proposedText)
+    }
 
     try {
-      const response = await fetch("/api/redline", {
-        method: "POST",
-        body: formData,
-      })
-
+      const response = await fetch("/api/redline", { method: "POST", body: formData })
       if (!response.ok) {
         const errorData = await response.json()
         throw new Error(errorData.details || "Failed to update document.")
       }
-
       const newFileBlob = await response.blob()
       const newFile = new File([newFileBlob], `modified_${file.name}`, { type: file.type })
 
-      // Update the state with the new file and re-process it
+      // Update file state for subsequent actions
       setFile(newFile)
-      setSelectedChangeId(null)
 
-      const extracted = await extractChanges(newFile)
-      setChanges(extracted)
+      // If it was a proposal, we must do a full refresh to see the new change in the list
+      if (isProposal) {
+        setSelectedChangeId(null)
+        setProposedTexts({})
+        const extracted = await extractChanges(newFile)
+        setChanges(extracted)
+        if (documentViewerRef.current) {
+          documentViewerRef.current.innerHTML = ""
+          await renderAsync(newFile, documentViewerRef.current)
+        }
+      } else {
+        // Otherwise, use the fast-path DOM update for simple accept/reject
+        setChanges((prevChanges) => prevChanges.filter((c) => c.id !== change.id))
+        setSelectedChangeId(null)
 
-      if (documentViewerRef.current) {
-        documentViewerRef.current.innerHTML = ""
-        await renderAsync(newFile, documentViewerRef.current)
+        const viewer = documentViewerRef.current
+        const mark = viewer?.querySelector("mark")
+        const parent = mark?.parentNode
+
+        if (viewer && mark && parent) {
+          if (action === "accept") {
+            if (change.type === "insertion") {
+              parent.replaceChild(document.createTextNode(change.text), mark)
+            } else {
+              parent.removeChild(mark)
+            }
+          } else {
+            // reject
+            if (change.type === "insertion") {
+              parent.removeChild(mark)
+            } else {
+              parent.replaceChild(document.createTextNode(change.text), mark)
+            }
+          }
+          parent.normalize()
+          originalTextRef.current = null
+        } else {
+          // Fallback to full refresh if live DOM manipulation fails
+          console.warn("Live update failed, falling back to full refresh.")
+          if (documentViewerRef.current) {
+            documentViewerRef.current.innerHTML = ""
+            await renderAsync(newFile, documentViewerRef.current)
+          }
+        }
       }
     } catch (e) {
       console.error(e)
@@ -162,7 +224,6 @@ export default function ContractRedlinePage() {
         <h1 className="text-2xl font-bold">Contract Redlining Assistant</h1>
       </header>
       <main className="grid grid-cols-1 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4 h-[calc(100vh-73px)]">
-        {/* Left Panel */}
         <aside className="lg:col-span-1 xl:col-span-1 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-700 flex flex-col">
           <div className="p-4 border-b dark:border-gray-700">
             <h2 className="text-lg font-semibold">Document Changes</h2>
@@ -235,7 +296,12 @@ export default function ContractRedlinePage() {
                       <h4 className="text-sm font-semibold flex items-center gap-2">
                         <MessageSquare size={16} /> Collaboration
                       </h4>
-                      <Textarea placeholder="Propose alternative text or add comments..." className="text-sm" />
+                      <Textarea
+                        placeholder="Propose alternative text..."
+                        className="text-sm"
+                        value={proposedTexts[change.id] || ""}
+                        onChange={(e) => handleProposalChange(change.id, e.target.value)}
+                      />
                       <div className="flex gap-2">
                         <Button
                           size="sm"
@@ -254,9 +320,6 @@ export default function ContractRedlinePage() {
                           <X className="w-4 h-4 mr-1" /> Reject
                         </Button>
                       </div>
-                      <p className="text-xs text-gray-500 dark:text-gray-400 pt-1">
-                        Accepting/rejecting will generate a new version of the document.
-                      </p>
                     </div>
                   )}
                 </CardContent>
@@ -264,8 +327,6 @@ export default function ContractRedlinePage() {
             ))}
           </div>
         </aside>
-
-        {/* Right Panel */}
         <main className="lg:col-span-2 xl:col-span-3 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-700 flex flex-col overflow-hidden">
           <div className="p-4 border-b dark:border-gray-700 flex items-center gap-2">
             <FileText className="w-5 h-5" />

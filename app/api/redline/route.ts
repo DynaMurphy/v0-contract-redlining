@@ -2,80 +2,104 @@ import { type NextRequest, NextResponse } from "next/server"
 import JSZip from "jszip"
 import { DOMParser, XMLSerializer } from "xmldom"
 
-// This is a simplified handler. A real-world app would need more robust error handling
-// and support for different change types (deletions, format changes, etc.).
+// Helper to replace the content of a node with new text
+function replaceNodeContentWithText(xmlDoc: Document, node: Element, text: string) {
+  // Clear existing content
+  while (node.firstChild) {
+    node.removeChild(node.firstChild)
+  }
+
+  // Create new run and text elements, which is the standard structure
+  const newRun = xmlDoc.createElement("w:r")
+  const newText = xmlDoc.createElement("w:t")
+
+  // Preserve whitespace in the new text
+  newText.setAttribute("xml:space", "preserve")
+  newText.appendChild(xmlDoc.createTextNode(text))
+
+  newRun.appendChild(newText)
+  node.appendChild(newRun)
+}
+
+// Helper to create a new w:ins node for proposals
+function createInsertionNode(xmlDoc: Document, text: string, author: string, newId: number): Element {
+  const insNode = xmlDoc.createElement("w:ins")
+  insNode.setAttribute("w:id", String(newId))
+  insNode.setAttribute("w:author", author)
+  insNode.setAttribute("w:date", new Date().toISOString())
+
+  const runNode = xmlDoc.createElement("w:r")
+  const textNode = xmlDoc.createElement("w:t")
+  textNode.setAttribute("xml:space", "preserve")
+  textNode.appendChild(xmlDoc.createTextNode(text))
+
+  runNode.appendChild(textNode)
+  insNode.appendChild(runNode)
+
+  return insNode
+}
+
 async function handleAcceptInsertion(xmlDoc: Document, changeId: string) {
   const insertions = xmlDoc.getElementsByTagName("w:ins")
-  let found = false
-
   for (let i = 0; i < insertions.length; i++) {
     const node = insertions[i]
     if (node.getAttribute("w:id") === changeId) {
-      found = true
       const parent = node.parentNode
-      if (parent) {
-        // Move all children of the <w:ins> tag to be direct children of the parent
-        while (node.firstChild) {
-          parent.insertBefore(node.firstChild, node)
-        }
-        // Remove the now-empty <w:ins> tag
-        parent.removeChild(node)
+      if (!parent) continue
+
+      // Move all children of the <w:ins> tag to be direct children of the parent
+      while (node.firstChild) {
+        parent.insertBefore(node.firstChild, node)
       }
-      break
+      parent.removeChild(node)
+      return
     }
   }
-
-  if (!found) {
-    throw new Error(`Change with ID ${changeId} not found.`)
-  }
+  throw new Error(`Insertion with ID ${changeId} not found.`)
 }
 
 async function handleRejectInsertion(xmlDoc: Document, changeId: string) {
   const insertions = xmlDoc.getElementsByTagName("w:ins")
-  let found = false
   for (let i = 0; i < insertions.length; i++) {
     const node = insertions[i]
     if (node.getAttribute("w:id") === changeId) {
-      found = true
       node.parentNode?.removeChild(node)
-      break
+      return
     }
   }
-  if (!found) throw new Error(`Change with ID ${changeId} not found.`)
+  throw new Error(`Insertion with ID ${changeId} not found.`)
 }
 
 async function handleAcceptDeletion(xmlDoc: Document, changeId: string) {
   const deletions = xmlDoc.getElementsByTagName("w:del")
-  let found = false
   for (let i = 0; i < deletions.length; i++) {
     const node = deletions[i]
     if (node.getAttribute("w:id") === changeId) {
-      found = true
+      // To accept a deletion, we simply remove the <w:del> node
       node.parentNode?.removeChild(node)
-      break
+      return
     }
   }
-  if (!found) throw new Error(`Change with ID ${changeId} not found.`)
+  throw new Error(`Deletion with ID ${changeId} not found.`)
 }
 
 async function handleRejectDeletion(xmlDoc: Document, changeId: string) {
   const deletions = xmlDoc.getElementsByTagName("w:del")
-  let found = false
   for (let i = 0; i < deletions.length; i++) {
     const node = deletions[i]
     if (node.getAttribute("w:id") === changeId) {
-      found = true
       const parent = node.parentNode
       if (parent) {
+        // Unwrap the content of the <w:del> tag, effectively restoring it
         while (node.firstChild) {
           parent.insertBefore(node.firstChild, node)
         }
         parent.removeChild(node)
       }
-      break
+      return
     }
   }
-  if (!found) throw new Error(`Change with ID ${changeId} not found.`)
+  throw new Error(`Deletion with ID ${changeId} not found.`)
 }
 
 export async function POST(request: NextRequest) {
@@ -85,6 +109,7 @@ export async function POST(request: NextRequest) {
     const changeId = formData.get("changeId") as string
     const changeType = formData.get("changeType") as "insertion" | "deletion"
     const action = formData.get("action") as "accept" | "reject"
+    const proposedText = formData.get("proposedText") as string | null
 
     if (!file || !changeId || !action || !changeType) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
@@ -102,23 +127,53 @@ export async function POST(request: NextRequest) {
     const parser = new DOMParser()
     const xmlDoc = parser.parseFromString(xmlString, "application/xml")
 
-    // Apply the change
-    if (action === "accept") {
-      if (changeType === "insertion") await handleAcceptInsertion(xmlDoc, changeId)
-      if (changeType === "deletion") await handleAcceptDeletion(xmlDoc, changeId)
+    // Special handling for "accept with proposal" to create a new tracked change
+    if (action === "accept" && proposedText && proposedText.trim() !== "") {
+      const allChangeNodes = [
+        ...Array.from(xmlDoc.getElementsByTagName("w:ins")),
+        ...Array.from(xmlDoc.getElementsByTagName("w:del")),
+      ]
+      let maxId = 0
+      allChangeNodes.forEach((node) => {
+        const id = Number.parseInt(node.getAttribute("w:id") || "0", 10)
+        if (id > maxId) {
+          maxId = id
+        }
+      })
+      const newChangeId = maxId + 1
+
+      let targetNode: Element | null = null
+      const nodes = xmlDoc.getElementsByTagName(changeType === "insertion" ? "w:ins" : "w:del")
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i].getAttribute("w:id") === changeId) {
+          targetNode = nodes[i]
+          break
+        }
+      }
+
+      if (targetNode && targetNode.parentNode) {
+        const newInsertion = createInsertionNode(xmlDoc, proposedText, "Reviewer", newChangeId)
+        targetNode.parentNode.insertBefore(newInsertion, targetNode)
+        targetNode.parentNode.removeChild(targetNode)
+      } else {
+        throw new Error(`Node with ID ${changeId} not found or has no parent.`)
+      }
     } else {
-      // reject
-      if (changeType === "insertion") await handleRejectInsertion(xmlDoc, changeId)
-      if (changeType === "deletion") await handleRejectDeletion(xmlDoc, changeId)
+      // Apply the simple change
+      if (action === "accept") {
+        if (changeType === "insertion") await handleAcceptInsertion(xmlDoc, changeId)
+        if (changeType === "deletion") await handleAcceptDeletion(xmlDoc, changeId)
+      } else {
+        // reject
+        if (changeType === "insertion") await handleRejectInsertion(xmlDoc, changeId)
+        if (changeType === "deletion") await handleRejectDeletion(xmlDoc, changeId)
+      }
     }
 
     const serializer = new XMLSerializer()
     const newXmlString = serializer.serializeToString(xmlDoc)
-
-    // Update the zip with the modified XML
     zip.file("word/document.xml", newXmlString)
 
-    // Generate the new docx file
     const newDocxBuffer = await zip.generateAsync({
       type: "nodebuffer",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
