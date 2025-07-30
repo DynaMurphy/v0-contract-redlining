@@ -86,5 +86,21 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  }
+}
+
+/* Layout utilities for contract redlining app */
+@layer utilities {
+  .layout-grid {
+    height: calc(100vh - 8rem); /* Adjust based on header height */
+  }
+  
+  .sidebar-scroll {
+    max-height: calc(100vh - 12rem);
+  }
+  
+  .document-viewer-scroll {
+    max-height: calc(100vh - 10rem);
   }
 }
