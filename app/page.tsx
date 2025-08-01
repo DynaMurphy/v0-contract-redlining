@@ -7,7 +7,7 @@ import { renderAsync } from "docx-preview"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { UploadCloud, FileText, MessageSquare, Check, X, User, Calendar, History, ChevronDown, ChevronUp, Download, RefreshCw, MoreVertical } from "lucide-react"
+import { UploadCloud, FileText, MessageSquare, Check, X, User, Calendar, History, ChevronDown, ChevronUp, Download, RefreshCw, MoreVertical, ZoomIn, ZoomOut, RotateCcw } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
@@ -20,6 +20,14 @@ interface ProcessedChange {
   action: "accepted" | "rejected"
   proposedText?: string
   processedAt: Date
+  reviewerName: string
+}
+
+interface ContractSection {
+  level: number
+  number: string
+  title: string
+  id: string
 }
 
 interface GroupedChanges {
@@ -31,12 +39,63 @@ interface GroupedChanges {
 }
 
 // Helper function to group changes by section and sort by date
-const groupChangesBySection = (changes: DocxChange[]): GroupedChanges => {
+const groupChangesBySection = (changes: DocxChange[], contractSections: ContractSection[]): GroupedChanges => {
   const grouped: GroupedChanges = {}
   
+  // Create a better matching system for changes to contract sections
+  const findBestMatchingSection = (change: DocxChange): ContractSection | null => {
+    if (!contractSections.length) return null
+    
+    // First, try to match based on text content similarity
+    if (change.text && change.text.length > 10) {
+      for (const section of contractSections) {
+        // Check if the change text contains keywords from the section title
+        const sectionWords = section.title.toLowerCase().split(/\s+/).filter(word => word.length > 3)
+        const changeText = change.text.toLowerCase()
+        
+        const matchCount = sectionWords.filter(word => changeText.includes(word)).length
+        if (matchCount > 0 && matchCount / sectionWords.length > 0.3) {
+          return section
+        }
+      }
+    }
+    
+    // Fallback: use document order as a rough approximation
+    // Extract numeric part from section/paragraph IDs to estimate position
+    const extractPosition = (id: string): number => {
+      const match = id.match(/(\d+)/)
+      return match ? parseInt(match[1], 10) : 0
+    }
+    
+    const changePosition = extractPosition(change.sectionId || change.paragraphId || '0')
+    
+    // Find the section that would be at approximately this position in the document
+    if (contractSections.length > 0) {
+      const sectionIndex = Math.min(
+        Math.floor((changePosition / 100) * contractSections.length),
+        contractSections.length - 1
+      )
+      return contractSections[sectionIndex]
+    }
+    
+    return null
+  }
+  
   changes.forEach(change => {
-    const sectionId = change.sectionId || change.paragraphId || 'unknown'
-    const sectionName = `Section ${sectionId.replace(/[^0-9]/g, '') || 'Unknown'}`
+    // Try to find the best matching contract section
+    const matchingSection = findBestMatchingSection(change)
+    
+    let sectionId: string
+    let sectionName: string
+    
+    if (matchingSection) {
+      sectionId = matchingSection.id
+      sectionName = matchingSection.title
+    } else {
+      // Fallback to original behavior but with cleaner naming
+      sectionId = change.sectionId || change.paragraphId || 'unknown'
+      sectionName = 'Document Section'
+    }
     
     if (!grouped[sectionId]) {
       grouped[sectionId] = {
@@ -50,7 +109,7 @@ const groupChangesBySection = (changes: DocxChange[]): GroupedChanges => {
     
     // Update latest date for sorting sections
     const changeDate = change.date ? new Date(change.date) : null
-    if (changeDate && (!grouped[sectionId].latestDate || changeDate > grouped[sectionId].latestDate)) {
+    if (changeDate && (!grouped[sectionId].latestDate || changeDate > grouped[sectionId].latestDate!)) {
       grouped[sectionId].latestDate = changeDate
     }
   })
@@ -67,11 +126,117 @@ const groupChangesBySection = (changes: DocxChange[]): GroupedChanges => {
   return grouped
 }
 
+// Component for rendering individual change
+const ChangeCard = ({ 
+  change, 
+  selectedChangeId, 
+  proposedTexts, 
+  isProcessing, 
+  onSelectChange, 
+  onProposalChange, 
+  onRedlineAction 
+}: { 
+  change: DocxChange
+  selectedChangeId: string | null
+  proposedTexts: Record<string, string>
+  isProcessing: boolean
+  onSelectChange: (change: DocxChange) => void
+  onProposalChange: (changeId: string, text: string) => void
+  onRedlineAction: (change: DocxChange, action: "accept" | "reject", useOriginal?: boolean) => void
+}) => (
+  <Card
+    onClick={() => onSelectChange(change)}
+    className={cn(
+      "cursor-pointer transition-all hover:shadow-md mb-2",
+      selectedChangeId === change.id
+        ? "border-primary ring-2 ring-primary"
+        : "border-gray-200 dark:border-gray-700",
+    )}
+  >
+    <CardHeader className="p-3">
+      <div className="flex justify-between items-start">
+        <div>
+          <Badge variant={change.type === "insertion" ? "default" : "destructive"}>
+            {change.type === "insertion" ? "Insertion" : "Deletion"}
+          </Badge>
+          <div className="text-xs text-gray-500 dark:text-gray-400 mt-2 flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              <User size={12} /> {change.author}
+            </div>
+            {change.date && (
+              <div className="flex items-center gap-1">
+                <Calendar size={12} /> {new Date(change.date).toLocaleDateString()}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </CardHeader>
+    <CardContent className="p-3 pt-0">
+      <p
+        className={cn(
+          "text-sm p-2 rounded-md",
+          change.type === "insertion"
+            ? "bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-200"
+            : "bg-red-50 dark:bg-red-900/50 text-red-800 dark:text-red-200 line-through",
+        )}
+      >
+        {change.text}
+      </p>
+      {selectedChangeId === change.id && (
+        <div className="mt-3 space-y-2">
+          <h4 className="text-sm font-semibold flex items-center gap-2">
+            <MessageSquare size={16} /> Actions
+          </h4>
+          <Textarea
+            placeholder="Propose alternative text..."
+            className="text-sm"
+            value={proposedTexts[change.id] || ""}
+            onChange={(e) => onProposalChange(change.id, e.target.value)}
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="default"
+              onClick={() => onRedlineAction(change, "accept", true)}
+              disabled={isProcessing}
+              className="bg-green-600 hover:bg-green-700"
+            >
+              <Check className="w-4 h-4 mr-1" /> Accept Original
+            </Button>
+            {proposedTexts[change.id]?.trim() && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRedlineAction(change, "accept", false)}
+                disabled={isProcessing}
+                className="border-blue-500 text-blue-600 hover:bg-blue-50"
+              >
+                <Check className="w-4 h-4 mr-1" /> Accept Proposal
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onRedlineAction(change, "reject")}
+              disabled={isProcessing}
+              className="border-red-500 text-red-600 hover:bg-red-50"
+            >
+              <X className="w-4 h-4 mr-1" /> Reject
+            </Button>
+          </div>
+        </div>
+      )}
+    </CardContent>
+  </Card>
+)
+
 export default function ContractRedlinePage() {
   const [file, setFile] = useState<File | null>(null)
   const [changes, setChanges] = useState<DocxChange[]>([])
   const [comments, setComments] = useState<DocxComment[]>([])
   const [processedChanges, setProcessedChanges] = useState<ProcessedChange[]>([])
+  const [contractSections, setContractSections] = useState<ContractSection[]>([])
   const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null)
   const [selectedCommentId, setSelectedCommentId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -81,6 +246,8 @@ export default function ContractRedlinePage() {
   const [showHistory, setShowHistory] = useState(false)
   const [activeTab, setActiveTab] = useState<"changes" | "comments">("changes")
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
+  const [reviewerName, setReviewerName] = useState<string>("Murphy van Oijen")
+  const [zoomLevel, setZoomLevel] = useState<number>(100)
 
   const documentViewerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -88,10 +255,10 @@ export default function ContractRedlinePage() {
 
   // Group changes by section for better organization
   const groupedChanges = useMemo(() => {
-    const grouped = groupChangesBySection(changes)
+    const grouped = groupChangesBySection(changes, contractSections)
     //console.log("Grouped changes:", grouped)
     return grouped
-  }, [changes])
+  }, [changes, contractSections])
   
   // Sort sections by latest change date
   const sortedSections = useMemo(() => {
@@ -174,6 +341,29 @@ export default function ContractRedlinePage() {
     }
   }, [proposedTexts, selectedChangeId])
 
+  const parseContractSections = async (file: File): Promise<ContractSection[]> => {
+    try {
+      const formData = new FormData()
+      formData.append("file", file)
+      
+      const response = await fetch("/api/parse-contract", {
+        method: "POST",
+        body: formData,
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.details || "Failed to parse contract sections")
+      }
+      
+      const data = await response.json()
+      return data.sections || []
+    } catch (error) {
+      console.error("Error parsing contract sections:", error)
+      return []
+    }
+  }
+
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = event.target.files?.[0]
     if (!uploadedFile) return
@@ -187,24 +377,29 @@ export default function ContractRedlinePage() {
     setChanges([])
     setComments([])
     setProcessedChanges([])
+    setContractSections([])
     setSelectedChangeId(null)
     setSelectedCommentId(null)
     setProposedTexts({})
     setExpandedSections(new Set())
+    setZoomLevel(100)
     
     try {
-      // Extract both changes and comments
-      const [extractedChanges, extractedComments] = await Promise.all([
+      // Extract changes, comments, and contract sections in parallel
+      const [extractedChanges, extractedComments, parsedSections] = await Promise.all([
         extractChanges(uploadedFile),
-        extractComments(uploadedFile)
+        extractComments(uploadedFile),
+        parseContractSections(uploadedFile)
       ])
       
       //console.log("Extracted changes count:", extractedChanges.length)
       //console.log("Extracted comments count:", extractedComments.length)
+      //console.log("Parsed sections count:", parsedSections.length)
       //console.log("Changes data:", extractedChanges)
       
       setChanges(extractedChanges)
       setComments(extractedComments)
+      setContractSections(parsedSections)
       
       if (documentViewerRef.current) {
         documentViewerRef.current.innerHTML = ""
@@ -259,20 +454,24 @@ export default function ContractRedlinePage() {
     setChanges([])
     setComments([])
     setProcessedChanges([])
+    setContractSections([])
     setSelectedChangeId(null)
     setSelectedCommentId(null)
     setProposedTexts({})
     setExpandedSections(new Set())
+    setZoomLevel(100)
     
     try {
-      // Extract both changes and comments
-      const [extractedChanges, extractedComments] = await Promise.all([
+      // Extract changes, comments, and contract sections in parallel
+      const [extractedChanges, extractedComments, parsedSections] = await Promise.all([
         extractChanges(file),
-        extractComments(file)
+        extractComments(file),
+        parseContractSections(file)
       ])
       
       setChanges(extractedChanges)
       setComments(extractedComments)
+      setContractSections(parsedSections)
       
       if (documentViewerRef.current) {
         documentViewerRef.current.innerHTML = ""
@@ -307,6 +506,18 @@ export default function ContractRedlinePage() {
     }
   }
 
+  const handleZoomIn = () => {
+    setZoomLevel(prev => Math.min(prev + 25, 200)) // Max zoom 200%
+  }
+
+  const handleZoomOut = () => {
+    setZoomLevel(prev => Math.max(prev - 25, 50)) // Min zoom 50%
+  }
+
+  const handleZoomReset = () => {
+    setZoomLevel(100) // Reset to 100%
+  }
+
   const handleRedlineAction = async (change: DocxChange, action: "accept" | "reject", useOriginal: boolean = false) => {
     if (!file) return
     setIsProcessing(true)
@@ -320,6 +531,7 @@ export default function ContractRedlinePage() {
     formData.append("changeId", change.id)
     formData.append("changeType", change.type)
     formData.append("action", action)
+    formData.append("reviewerName", reviewerName.trim() || "Anonymous")
     if (isProposal) {
       formData.append("proposedText", proposedText)
     }
@@ -336,58 +548,57 @@ export default function ContractRedlinePage() {
       // Update file state for subsequent actions
       setFile(newFile)
 
-      // If it was a proposal, we must do a full refresh to see the new change in the list
-      if (isProposal) {
-        setSelectedChangeId(null)
-        setProposedTexts({})
-        const extracted = await extractChanges(newFile)
-        setChanges(extracted)
+      // Move the change to processed changes and remove from active changes
+      const processedChange: ProcessedChange = {
+        id: change.id,
+        originalChange: change,
+        action: action === "accept" ? "accepted" : "rejected",
+        proposedText: proposedText,
+        processedAt: new Date(),
+        reviewerName: reviewerName.trim() || "Anonymous"
+      }
+      
+      setProcessedChanges((prev) => [...prev, processedChange])
+      setChanges((prevChanges) => prevChanges.filter((c) => c.id !== change.id))
+      setSelectedChangeId(null)
+      
+      // Clear the proposed text for this change
+      setProposedTexts((prev) => {
+        const newProposedTexts = { ...prev }
+        delete newProposedTexts[change.id]
+        return newProposedTexts
+      })
+
+      const viewer = documentViewerRef.current
+      const mark = viewer?.querySelector("mark")
+      const parent = mark?.parentNode
+
+      if (viewer && mark && parent) {
+        if (action === "accept") {
+          // For proposals, use the proposed text; for original accepts, use the change text
+          const finalText = isProposal ? proposedText : change.text
+          
+          if (change.type === "insertion") {
+            parent.replaceChild(document.createTextNode(finalText), mark)
+          } else {
+            parent.removeChild(mark)
+          }
+        } else {
+          // reject
+          if (change.type === "insertion") {
+            parent.removeChild(mark)
+          } else {
+            parent.replaceChild(document.createTextNode(change.text), mark)
+          }
+        }
+        parent.normalize()
+        originalTextRef.current = null
+      } else {
+        // Fallback to full refresh if live DOM manipulation fails
+        console.warn("Live update failed, falling back to full refresh.")
         if (documentViewerRef.current) {
           documentViewerRef.current.innerHTML = ""
           await renderAsync(newFile, documentViewerRef.current)
-        }
-      } else {
-        // Move the change to processed changes and remove from active changes
-        const processedChange: ProcessedChange = {
-          id: change.id,
-          originalChange: change,
-          action: action === "accept" ? "accepted" : "rejected",
-          proposedText: proposedText,
-          processedAt: new Date()
-        }
-        
-        setProcessedChanges((prev) => [...prev, processedChange])
-        setChanges((prevChanges) => prevChanges.filter((c) => c.id !== change.id))
-        setSelectedChangeId(null)
-
-        const viewer = documentViewerRef.current
-        const mark = viewer?.querySelector("mark")
-        const parent = mark?.parentNode
-
-        if (viewer && mark && parent) {
-          if (action === "accept") {
-            if (change.type === "insertion") {
-              parent.replaceChild(document.createTextNode(change.text), mark)
-            } else {
-              parent.removeChild(mark)
-            }
-          } else {
-            // reject
-            if (change.type === "insertion") {
-              parent.removeChild(mark)
-            } else {
-              parent.replaceChild(document.createTextNode(change.text), mark)
-            }
-          }
-          parent.normalize()
-          originalTextRef.current = null
-        } else {
-          // Fallback to full refresh if live DOM manipulation fails
-          console.warn("Live update failed, falling back to full refresh.")
-          if (documentViewerRef.current) {
-            documentViewerRef.current.innerHTML = ""
-            await renderAsync(newFile, documentViewerRef.current)
-          }
         }
       }
     } catch (e) {
@@ -398,95 +609,6 @@ export default function ContractRedlinePage() {
       setIsProcessing(false)
     }
   }
-
-  // Component for rendering individual change
-  const ChangeCard = ({ change }: { change: DocxChange }) => (
-    <Card
-      onClick={() => handleSelectChange(change)}
-      className={cn(
-        "cursor-pointer transition-all hover:shadow-md mb-2",
-        selectedChangeId === change.id
-          ? "border-primary ring-2 ring-primary"
-          : "border-gray-200 dark:border-gray-700",
-      )}
-    >
-      <CardHeader className="p-3">
-        <div className="flex justify-between items-start">
-          <div>
-            <Badge variant={change.type === "insertion" ? "default" : "destructive"}>
-              {change.type === "insertion" ? "Insertion" : "Deletion"}
-            </Badge>
-            <div className="text-xs text-gray-500 dark:text-gray-400 mt-2 flex items-center gap-2">
-              <div className="flex items-center gap-1">
-                <User size={12} /> {change.author}
-              </div>
-              {change.date && (
-                <div className="flex items-center gap-1">
-                  <Calendar size={12} /> {new Date(change.date).toLocaleDateString()}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent className="p-3 pt-0">
-        <p
-          className={cn(
-            "text-sm p-2 rounded-md",
-            change.type === "insertion"
-              ? "bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-200"
-              : "bg-red-50 dark:bg-red-900/50 text-red-800 dark:text-red-200 line-through",
-          )}
-        >
-          {change.text}
-        </p>
-        {selectedChangeId === change.id && (
-          <div className="mt-3 space-y-2">
-            <h4 className="text-sm font-semibold flex items-center gap-2">
-              <MessageSquare size={16} /> Actions
-            </h4>
-            <Textarea
-              placeholder="Propose alternative text..."
-              className="text-sm"
-              value={proposedTexts[change.id] || ""}
-              onChange={(e) => handleProposalChange(change.id, e.target.value)}
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                variant="default"
-                onClick={() => handleRedlineAction(change, "accept", true)}
-                disabled={isProcessing}
-                className="bg-green-600 hover:bg-green-700"
-              >
-                <Check className="w-4 h-4 mr-1" /> Accept Original
-              </Button>
-              {proposedTexts[change.id]?.trim() && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => handleRedlineAction(change, "accept", false)}
-                  disabled={isProcessing}
-                  className="border-blue-500 text-blue-600 hover:bg-blue-50"
-                >
-                  <Check className="w-4 h-4 mr-1" /> Accept Proposal
-                </Button>
-              )}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => handleRedlineAction(change, "reject")}
-                disabled={isProcessing}
-                className="border-red-500 text-red-600 hover:bg-red-50"
-              >
-                <X className="w-4 h-4 mr-1" /> Reject
-              </Button>
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  )
 
   return (
     <div className="h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 flex flex-col overflow-hidden">
@@ -544,6 +666,17 @@ export default function ContractRedlinePage() {
                   {showHistory ? "Hide" : "Show"} History
                 </Button>
               )}
+            </div>
+            
+            {/* Reviewer Name Input */}
+            <div className="mb-3">
+              <input
+                type="text"
+                placeholder="Enter reviewer name..."
+                value={reviewerName}
+                onChange={(e) => setReviewerName(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+              />
             </div>
             
             {/* Tab Navigation */}
@@ -653,7 +786,13 @@ export default function ContractRedlinePage() {
                                 {section.changes.map((change) => (
                                   <ChangeCard 
                                     key={change.id}
-                                    change={change} 
+                                    change={change}
+                                    selectedChangeId={selectedChangeId}
+                                    proposedTexts={proposedTexts}
+                                    isProcessing={isProcessing}
+                                    onSelectChange={handleSelectChange}
+                                    onProposalChange={handleProposalChange}
+                                    onRedlineAction={handleRedlineAction}
                                   />
                                 ))}
                               </div>
@@ -759,6 +898,9 @@ export default function ContractRedlinePage() {
                               <div className="flex items-center gap-1">
                                 <Calendar size={12} /> {processedChange.processedAt.toLocaleDateString()}
                               </div>
+                              <div className="flex items-center gap-1">
+                                <span className="text-xs">Reviewed by: {processedChange.reviewerName}</span>
+                              </div>
                             </div>
                           </div>
                         </div>
@@ -791,12 +933,56 @@ export default function ContractRedlinePage() {
           </div>
         </aside>
         <main className="lg:col-span-2 xl:col-span-3 bg-white dark:bg-gray-800 rounded-lg border dark:border-gray-700 flex flex-col overflow-hidden">
-          <div className="p-4 border-b dark:border-gray-700 flex items-center gap-2 flex-shrink-0">
-            <FileText className="w-5 h-5" />
-            <h2 className="text-lg font-semibold">{file ? file.name : "Document Viewer"}</h2>
+          <div className="p-4 border-b dark:border-gray-700 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <FileText className="w-5 h-5" />
+              <h2 className="text-lg font-semibold">{file ? file.name : "Document Viewer"}</h2>
+            </div>
+            {file && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleZoomOut}
+                  disabled={zoomLevel <= 50}
+                  className="h-8 w-8 p-0"
+                >
+                  <ZoomOut className="w-4 h-4" />
+                </Button>
+                <span className="text-sm text-gray-600 dark:text-gray-400 min-w-[3rem] text-center">
+                  {zoomLevel}%
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleZoomIn}
+                  disabled={zoomLevel >= 200}
+                  className="h-8 w-8 p-0"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleZoomReset}
+                  disabled={zoomLevel === 100}
+                  className="h-8 w-8 p-0"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </Button>
+              </div>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto p-2 md:p-4 lg:p-8">
-            <div ref={documentViewerRef} className="docx-container">
+            <div 
+              ref={documentViewerRef} 
+              className="docx-container transition-transform duration-200 ease-in-out"
+              style={{ 
+                transform: `scale(${zoomLevel / 100})`, 
+                transformOrigin: 'top left',
+                width: `${10000 / zoomLevel}%`
+              }}
+            >
               {!file && (
                 <div className="flex items-center justify-center h-full text-gray-400">
                   Upload a document to view it here.

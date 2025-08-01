@@ -110,6 +110,7 @@ export async function POST(request: NextRequest) {
     const changeType = formData.get("changeType") as "insertion" | "deletion"
     const action = formData.get("action") as "accept" | "reject"
     const proposedText = formData.get("proposedText") as string | null
+    const reviewerName = formData.get("reviewerName") as string | null
 
     if (!file || !changeId || !action || !changeType) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
@@ -135,7 +136,8 @@ export async function POST(request: NextRequest) {
       ]
       let maxId = 0
       allChangeNodes.forEach((node) => {
-        const id = Number.parseInt(node.getAttribute("w:id") || "0", 10)
+        const element = node as Element
+        const id = Number.parseInt(element.getAttribute("w:id") || "0", 10)
         if (id > maxId) {
           maxId = id
         }
@@ -152,7 +154,8 @@ export async function POST(request: NextRequest) {
       }
 
       if (targetNode && targetNode.parentNode) {
-        const newInsertion = createInsertionNode(xmlDoc, proposedText, "Reviewer", newChangeId)
+        const authorName = reviewerName?.trim() || "Anonymous Reviewer"
+        const newInsertion = createInsertionNode(xmlDoc, proposedText, authorName, newChangeId)
         targetNode.parentNode.insertBefore(newInsertion, targetNode)
         targetNode.parentNode.removeChild(targetNode)
       } else {
